@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.junie/*
+.air/*
 
 # Editor directories and files
 .vscode/*
@@ -24,6 +26,4 @@ dist-ssr
 *.sw?
 .env
 
-.junie/*
-.air/*
 
