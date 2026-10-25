@@ -7,7 +7,7 @@ mod smtc;
 use std::sync::Arc;
 
 use auth::{clear_auth_session, get_auth_session, open_google_login, AuthManager};
-use innertube::{ytm_get_home, ytm_get_stream, ytm_search, InnertubeClient};
+use innertube::{ytm_get_home, ytm_get_playlist, ytm_get_stream, ytm_search, InnertubeClient};
 use metadata::{spotify_get_track, spotify_search, SpotifyClient};
 use resolver::{resolve_audio, ytdlp_extract_audio};
 use smtc::{hide_to_tray, smtc_update_playback, SmtcManager};
@@ -49,6 +49,7 @@ pub fn run() {
             // InnerTube (YouTube Music internal API)
             ytm_get_home,
             ytm_search,
+            ytm_get_playlist,
             ytm_get_stream,
             // Spotify Metadata (secure server-side)
             spotify_search,

@@ -1,5 +1,20 @@
 import { Track, RepeatMode } from "../types/music";
+
+const FALLBACK_AUDIO_URL = "https://cdn.freesound.org/previews/612/612610_5674468-lq.mp3";
 import { syncWindowsSmtc } from "./tauriBridge";
+
+export interface StreamResolutionInfo {
+  url: string;
+  source: string;
+  quality?: string;
+  isFallback?: boolean;
+}
+
+/** Injected by the app layer so queue auto-advance can resolve real streams. */
+export type StreamResolver = (
+  track: Track,
+  options?: { forceRefresh?: boolean }
+) => Promise<StreamResolutionInfo>;
 
 export type AudioStateListener = (state: {
   currentTrack: Track | null;
@@ -8,10 +23,15 @@ export type AudioStateListener = (state: {
   duration: number;
   buffered: number;
   isBuffering: boolean;
+  isResolving: boolean;
   volume: number;
   isMuted: boolean;
   repeatMode: RepeatMode;
   isShuffled: boolean;
+  /** Which resolver produced the current audio URL, e.g. `piped:host` or `yt-dlp`. */
+  streamSource: string | null;
+  /** True when the current track is playing from the offline demo sample. */
+  isFallbackStream: boolean;
 }) => void;
 
 class AudioEngine {
@@ -23,8 +43,16 @@ class AudioEngine {
   private repeatMode: RepeatMode = "off";
   private isShuffled = false;
   private isBuffering = false;
+  private isResolving = false;
   private listeners: Set<AudioStateListener> = new Set();
   private updateInterval: number | null = null;
+  private streamResolver: StreamResolver | null = null;
+  private streamSource: string | null = null;
+  private isFallbackStream = false;
+  /** Guards against a slow resolution overwriting a newer track selection. */
+  private playRequestId = 0;
+  /** Track id that already consumed its single automatic stream retry. */
+  private retryTrackId: string | null = null;
 
   constructor() {
     this.audio = new Audio();
@@ -66,11 +94,41 @@ class AudioEngine {
       console.error("Audio playback error:", e);
       this.isBuffering = false;
       this.notifyListeners();
+      void this.recoverFromStreamError();
     });
 
     this.audio.addEventListener("timeupdate", () => {
       this.notifyListeners();
     });
+  }
+
+  /**
+   * Signed googlevideo/instance URLs expire after a while. When a saved track
+   * fails to load, re-resolve it once with a forced refresh instead of leaving
+   * the player stuck on an error.
+   */
+  private async recoverFromStreamError() {
+    const track = this.currentTrack;
+    if (!track || !this.streamResolver || this.audio.src === FALLBACK_AUDIO_URL) return;
+    if (this.retryTrackId === track.id) return;
+
+    this.retryTrackId = track.id;
+    this.isResolving = true;
+    this.notifyListeners();
+
+    try {
+      const resolution = await this.streamResolver(track, { forceRefresh: true });
+      if (this.currentTrack?.id !== track.id) return;
+      this.streamSource = resolution.source;
+      this.isFallbackStream = Boolean(resolution.isFallback);
+      this.audio.src = resolution.url;
+      await this.audio.play().catch(() => undefined);
+    } catch (err) {
+      console.warn("Stream recovery failed:", err);
+    } finally {
+      this.isResolving = false;
+      this.notifyListeners();
+    }
   }
 
   private startTimeTracker() {
@@ -132,14 +190,31 @@ class AudioEngine {
       duration: this.audio.duration || this.currentTrack?.duration || 0,
       buffered: this.audio.buffered.length > 0 ? this.audio.buffered.end(this.audio.buffered.length - 1) : 0,
       isBuffering: this.isBuffering,
+      isResolving: this.isResolving,
       volume: this.audio.volume,
       isMuted: this.audio.muted,
       repeatMode: this.repeatMode,
       isShuffled: this.isShuffled,
+      streamSource: this.streamSource,
+      isFallbackStream: this.isFallbackStream,
     };
   }
 
-  public async playTrack(track: Track, queueContext?: Track[], streamUrl?: string) {
+  /**
+   * Registers the stream resolver used for every playback (including automatic
+   * queue advance). Without it, skipping to the next track would not resolve a
+   * live URL and would silently fall back to the demo sample.
+   */
+  public setStreamResolver(resolver: StreamResolver | null) {
+    this.streamResolver = resolver;
+  }
+
+  public async playTrack(
+    track: Track,
+    queueContext?: Track[],
+    streamUrl?: string,
+    streamSource?: string
+  ) {
     if (queueContext && queueContext.length > 0) {
       this.originalQueue = [...queueContext];
       this.queue = this.isShuffled ? this.shuffleArray([...queueContext]) : [...queueContext];
@@ -154,10 +229,44 @@ class AudioEngine {
       this.queueIndex = 0;
     }
 
+    const requestId = ++this.playRequestId;
     this.currentTrack = track;
-    const resolvedStream = streamUrl || track.streamUrl || "https://cdn.freesound.org/previews/612/612610_5674468-lq.mp3";
+    this.retryTrackId = null;
+    this.streamSource = streamSource || null;
+    this.isFallbackStream = false;
 
-    this.audio.src = resolvedStream;
+    let resolvedUrl = streamUrl || track.streamUrl;
+
+    // Resolve online when we have no direct URL yet (stream URLs expire, so a
+    // saved playlist track always needs a fresh resolution).
+    if (!resolvedUrl && this.streamResolver) {
+      this.isResolving = true;
+      this.isBuffering = true;
+      this.notifyListeners();
+      try {
+        const resolution = await this.streamResolver(track);
+        // A newer track was selected while we were resolving — abandon this one.
+        if (requestId !== this.playRequestId) return;
+        resolvedUrl = resolution.url;
+        this.streamSource = resolution.source;
+        this.isFallbackStream = Boolean(resolution.isFallback);
+      } catch (e) {
+        console.warn("Stream resolution failed:", e);
+      } finally {
+        if (requestId === this.playRequestId) {
+          this.isResolving = false;
+        }
+      }
+      if (requestId !== this.playRequestId) return;
+    }
+
+    const finalUrl = resolvedUrl || FALLBACK_AUDIO_URL;
+    if (!resolvedUrl) {
+      this.isFallbackStream = true;
+      this.streamSource = this.streamSource || "offline:sample";
+    }
+
+    this.audio.src = finalUrl;
     this.isBuffering = true;
     this.notifyListeners();
 

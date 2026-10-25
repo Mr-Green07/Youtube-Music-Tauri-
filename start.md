@@ -74,3 +74,35 @@ The built application will be available in `src-tauri/target/release/bundle/`.
 - [Tauri Documentation](https://tauri.app/v1/guides/)
 - [Vite Documentation](https://vitejs.dev/guide/)
 - [React Documentation](https://react.dev/learn)
+
+## Online Streaming & Playlists
+
+### Streaming
+
+Playback resolves through a cascade, so a single blocked provider does not stop the music:
+
+1. `resolve_audio` (Rust) — yt-dlp sidecar → Piped → Invidious
+2. `ytm_get_stream` (Rust) — YouTube Music Innertube `player` endpoint
+3. yt-dlp sidecar invoked directly from the WebView
+4. Piped / Invidious public APIs from the WebView (this is what `pnpm dev` uses)
+5. Demo sample — only when every network layer fails
+
+The player bar badge tells you which layer is currently live, e.g. `LIVE · Piped`,
+`LIVE · Innertube`, `LIVE · yt-dlp`, or `Demo sample`.
+
+Stream URLs expire, so they are resolved fresh for every playback (including
+next/previous and auto-advance). If a URL has expired mid-track, the engine
+re-resolves it once automatically.
+
+### Saving music to playlists
+
+Hover any song row or card and press the **Save to playlist** icon (also available in
+the player bar). In the dialog you can:
+
+* toggle the song in/out of an existing playlist,
+* create a new playlist and save the song into it immediately.
+
+Playlists are stored locally (`ytm_user_playlists_v1` in `localStorage`) and appear in
+**Library → Your Playlists**, where you can rename, delete, play, shuffle and remove
+tracks. Opening a YouTube Music playlist from search or the home feed offers
+**Save playlist to library** to import all of its tracks at once.

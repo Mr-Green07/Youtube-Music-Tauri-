@@ -12,6 +12,9 @@ import {
   VolumeX,
   Heart,
   ListMusic,
+  ListPlus,
+  Radio,
+  Loader2,
 } from "lucide-react";
 import { Track, RepeatMode } from "../types/music";
 
@@ -26,6 +29,12 @@ interface PlayerBarProps {
   isShuffled: boolean;
   queueCount: number;
   isQueueOpen: boolean;
+  /** Resolver that produced the current audio URL (shown as the live stream badge). */
+  streamSource?: string | null;
+  isResolving?: boolean;
+  isFallbackStream?: boolean;
+  /** Canonical liked ids so the heart stays in sync with the library. */
+  likedIds?: string[];
   onTogglePlay: () => void;
   onNext: () => void;
   onPrevious: () => void;
@@ -35,7 +44,8 @@ interface PlayerBarProps {
   onToggleRepeat: () => void;
   onToggleShuffle: () => void;
   onToggleQueue: () => void;
-  onToggleLike: (trackId: string) => void;
+  onToggleLike: (track: Track) => void;
+  onSaveToPlaylist: (track: Track) => void;
 }
 
 function formatTime(seconds: number): string {
@@ -43,6 +53,36 @@ function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s < 10 ? "0" : ""}${s}`;
+}
+
+interface StreamBadge {
+  label: string;
+  tone: string;
+}
+
+function describeStream(source?: string | null, isFallback?: boolean, isResolving?: boolean): StreamBadge {
+  if (isResolving) {
+    return { label: "Resolving stream…", tone: "bg-zinc-800 text-zinc-300 border-zinc-700/60" };
+  }
+  if (!source) {
+    return { label: "Idle", tone: "bg-zinc-900 text-zinc-500 border-zinc-800" };
+  }
+  if (isFallback || source.startsWith("offline") || source.startsWith("demo")) {
+    return { label: "Demo sample", tone: "bg-amber-950/60 text-amber-300 border-amber-800/60" };
+  }
+  if (source.startsWith("piped")) {
+    return { label: "LIVE · Piped", tone: "bg-emerald-950/60 text-emerald-300 border-emerald-800/60" };
+  }
+  if (source.startsWith("invidious")) {
+    return { label: "LIVE · Invidious", tone: "bg-emerald-950/60 text-emerald-300 border-emerald-800/60" };
+  }
+  if (source.startsWith("innertube")) {
+    return { label: "LIVE · Innertube", tone: "bg-emerald-950/60 text-emerald-300 border-emerald-800/60" };
+  }
+  if (source.startsWith("yt-dlp")) {
+    return { label: "LIVE · yt-dlp", tone: "bg-emerald-950/60 text-emerald-300 border-emerald-800/60" };
+  }
+  return { label: "LIVE · Cached", tone: "bg-emerald-950/60 text-emerald-300 border-emerald-800/60" };
 }
 
 export const PlayerBar: React.FC<PlayerBarProps> = ({
@@ -56,6 +96,10 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   isShuffled,
   queueCount,
   isQueueOpen,
+  streamSource,
+  isResolving,
+  isFallbackStream,
+  likedIds,
   onTogglePlay,
   onNext,
   onPrevious,
@@ -66,6 +110,7 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onToggleShuffle,
   onToggleQueue,
   onToggleLike,
+  onSaveToPlaylist,
 }) => {
   const [hoverSeekTime, setHoverSeekTime] = useState<number | null>(null);
 
@@ -87,6 +132,11 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   };
 
   const effectiveVolume = isMuted ? 0 : volume;
+  const isCurrentLiked = currentTrack
+    ? likedIds
+      ? likedIds.includes(currentTrack.id)
+      : Boolean(currentTrack.isLiked)
+    : false;
 
   return (
     <div className="h-20 w-full bg-[#101014] border-t border-[#1c1c20] flex flex-col justify-between px-4 py-2 select-none z-40 shrink-0">
@@ -137,13 +187,21 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
                 </span>
               </div>
               <button
-                onClick={() => onToggleLike(currentTrack.id)}
+                onClick={() => onToggleLike(currentTrack)}
                 className={`p-1.5 rounded-full hover:bg-zinc-800 transition-colors shrink-0 ${
-                  currentTrack.isLiked ? "text-red-500" : "text-zinc-500 hover:text-zinc-300"
+                  isCurrentLiked ? "text-red-500" : "text-zinc-500 hover:text-zinc-300"
                 }`}
-                title={currentTrack.isLiked ? "Unlike" : "Like track"}
+                title={isCurrentLiked ? "Remove from liked songs" : "Add to liked songs"}
               >
-                <Heart className={`w-4 h-4 ${currentTrack.isLiked ? "fill-current" : ""}`} />
+                <Heart className={`w-4 h-4 ${isCurrentLiked ? "fill-current" : ""}`} />
+              </button>
+              <button
+                onClick={() => onSaveToPlaylist(currentTrack)}
+                className="p-1.5 rounded-full text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors shrink-0"
+                title="Save to playlist"
+                aria-label="Save to playlist"
+              >
+                <ListPlus className="w-4 h-4" />
               </button>
             </>
           ) : (
@@ -216,9 +274,22 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
 
         {/* Right: Quality, Volume, Queue */}
         <div className="flex items-center justify-end space-x-3 w-1/4 min-w-[200px]">
-          <span className="text-[9px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/50">
-            Opus 160k
-          </span>
+          {(() => {
+            const badge = describeStream(streamSource, isFallbackStream, isResolving);
+            return (
+              <span
+                className={`flex items-center space-x-1 text-[9px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border ${badge.tone}`}
+                title={streamSource ? `Stream source: ${streamSource}` : "No active stream"}
+              >
+                {isResolving ? (
+                  <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                ) : (
+                  <Radio className="w-2.5 h-2.5" />
+                )}
+                <span className="max-w-[110px] truncate">{badge.label}</span>
+              </span>
+            );
+          })()}
 
           {/* Volume Control */}
           <div className="flex items-center space-x-1.5">

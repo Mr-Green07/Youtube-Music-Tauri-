@@ -3,8 +3,10 @@
  *
  * Handles audio stream resolution through multiple strategies:
  * 1. Rust backend command (resolve_audio) — cascading yt-dlp → Piped → Invidious
- * 2. Direct yt-dlp sidecar invocation via Tauri Shell plugin
- * 3. Spotify metadata enrichment for track discovery
+ * 2. Rust backend command (ytm_get_stream) — Innertube player endpoint
+ * 3. Direct yt-dlp sidecar invocation via Tauri Shell plugin
+ * 4. Piped / Invidious public instances over plain fetch (also works in browser)
+ * 5. Spotify metadata enrichment for track discovery
  *
  * All YouTube Data API v3 usage is avoided; streams are extracted from
  * decentralized instances and the bundled yt-dlp binary.
@@ -237,40 +239,145 @@ export async function getSpotifyTrack(
   }
 }
 
+// ── Innertube Player API (Tauri backend) ─────────────────────────────────────
+
+/**
+ * Asks the Rust backend to resolve via the YouTube Music Innertube `player`
+ * endpoint (`ytm_get_stream`). The backend cascades into yt-dlp / Piped /
+ * Invidious when Innertube refuses to hand out a URL.
+ */
+export async function resolveAudioViaInnertube(
+  videoId: string
+): Promise<AudioStreamResult | null> {
+  const core = await getTauriCore();
+  if (!core) return null;
+
+  try {
+    const url = await core.invoke<string>("ytm_get_stream", { videoId });
+    if (url && url.startsWith("http")) {
+      return { url, source: "innertube:music.youtube.com", format: "audio" };
+    }
+  } catch (e) {
+    console.warn("[resolver] Innertube ytm_get_stream failed:", e);
+  }
+
+  return null;
+}
+
+// ── Public Instance Streaming (works in Tauri *and* plain browser) ───────────
+
+/**
+ * Resolves through Piped / Invidious public instances over plain `fetch`.
+ * This is what makes online streaming work in the browser preview and it is
+ * also the last network layer for the desktop build.
+ */
+export async function resolveAudioViaOnlineInstances(
+  videoId: string
+): Promise<AudioStreamResult | null> {
+  try {
+    const { resolveStreamOnline } = await import("./onlineStream");
+    const resolved = await resolveStreamOnline(videoId);
+    if (resolved?.url) {
+      return {
+        url: resolved.url,
+        source: resolved.source,
+        quality: resolved.bitrate ? `${Math.round(resolved.bitrate / 1000)}kbps` : undefined,
+      };
+    }
+  } catch (e) {
+    console.warn("[resolver] Public instance resolution failed:", e);
+  }
+  return null;
+}
+
 // ── Unified Resolution Pipeline ──────────────────────────────────────────────
+
+export interface StreamResolution {
+  url: string;
+  source: string;
+  quality?: string;
+  /** True when the URL came from the bundled demo sample (offline mode). */
+  isFallback?: boolean;
+}
+
+export const FALLBACK_STREAM_URL =
+  "https://cdn.freesound.org/previews/612/612610_5674468-lq.mp3";
+
+/** A YouTube video id is 11 url-safe characters. Demo/mock ids are not. */
+export function isRealVideoId(id: string): boolean {
+  return /^[A-Za-z0-9_-]{11}$/.test(id);
+}
 
 /**
  * Master resolver: attempts all available strategies in priority order
- * to resolve a Track to a playable audio stream URL.
+ * to resolve a Track to a playable audio stream URL, reporting which layer won.
  *
  * Resolution cascade:
- * 1. Track already has a streamUrl → use directly
- * 2. Rust backend resolve_audio (yt-dlp → Piped → Invidious)
- * 3. Frontend yt-dlp sidecar direct call (redundant safety net)
- * 4. Fallback sample stream
+ * 1. Track already carries a (still fresh) streamUrl          → direct
+ * 2. Rust backend resolve_audio (yt-dlp → Piped → Invidious)  → desktop
+ * 3. Rust backend ytm_get_stream (Innertube player)           → desktop
+ * 4. Frontend yt-dlp sidecar direct call                      → desktop
+ * 5. Piped / Invidious public instances (fetch)               → desktop + browser
+ * 6. Royalty-free fallback sample                             → demo/offline
  */
+export async function resolveTrackAudioDetailed(
+  track: Track,
+  quality: AudioQuality = "best",
+  options: { forceRefresh?: boolean } = {}
+): Promise<StreamResolution> {
+  if (options.forceRefresh) {
+    try {
+      const { clearStreamCache } = await import("./onlineStream");
+      clearStreamCache();
+    } catch {
+      // ignore — cache is a best-effort optimisation
+    }
+  }
+
+  // Fast path: track already has a resolved stream
+  if (track.streamUrl && !options.forceRefresh) {
+    return { url: track.streamUrl, source: "cache:direct", isFallback: false };
+  }
+
+  // Demo/mock tracks have synthetic ids — nothing online can resolve them.
+  if (!isRealVideoId(track.id)) {
+    return { url: FALLBACK_STREAM_URL, source: "demo:sample", isFallback: true };
+  }
+
+  // Layer 1: Rust backend cascading resolver (yt-dlp → Piped → Invidious)
+  const backendResult = await resolveAudioViaBackend(track.id, quality);
+  if (backendResult?.url) {
+    return { url: backendResult.url, source: backendResult.source, quality: backendResult.quality };
+  }
+
+  // Layer 2: Innertube player endpoint through the Rust backend
+  const innertubeResult = await resolveAudioViaInnertube(track.id);
+  if (innertubeResult?.url) {
+    return { url: innertubeResult.url, source: innertubeResult.source, quality: innertubeResult.quality };
+  }
+
+  // Layer 3: Direct yt-dlp sidecar (frontend-driven fallback)
+  const sidecarResult = await resolveAudioViaYtDlpSidecar(track.id, quality);
+  if (sidecarResult?.url) {
+    return { url: sidecarResult.url, source: sidecarResult.source, quality: sidecarResult.quality };
+  }
+
+  // Layer 4: Piped / Invidious public instances over fetch
+  const onlineResult = await resolveAudioViaOnlineInstances(track.id);
+  if (onlineResult?.url) {
+    return { url: onlineResult.url, source: onlineResult.source, quality: onlineResult.quality };
+  }
+
+  // Layer 5: Fallback sample stream for offline/demo mode
+  console.warn("[resolver] All resolvers exhausted, using fallback stream");
+  return { url: FALLBACK_STREAM_URL, source: "offline:sample", isFallback: true };
+}
+
+/** String-only convenience wrapper kept for backwards compatibility. */
 export async function resolveTrackAudio(
   track: Track,
   quality: AudioQuality = "best"
 ): Promise<string> {
-  // Fast path: track already has a resolved stream
-  if (track.streamUrl) {
-    return track.streamUrl;
-  }
-
-  // Layer 1: Rust backend cascading resolver
-  const backendResult = await resolveAudioViaBackend(track.id, quality);
-  if (backendResult?.url) {
-    return backendResult.url;
-  }
-
-  // Layer 2: Direct yt-dlp sidecar (frontend-driven fallback)
-  const sidecarResult = await resolveAudioViaYtDlpSidecar(track.id, quality);
-  if (sidecarResult?.url) {
-    return sidecarResult.url;
-  }
-
-  // Layer 3: Fallback sample stream for offline/demo mode
-  console.warn("[resolver] All resolvers exhausted, using fallback stream");
-  return "https://cdn.freesound.org/previews/612/612610_5674468-lq.mp3";
+  const resolved = await resolveTrackAudioDetailed(track, quality);
+  return resolved.url;
 }

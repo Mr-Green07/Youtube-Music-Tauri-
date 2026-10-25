@@ -18,6 +18,12 @@ export interface Playlist {
   trackCount: number;
   author?: string;
   tracks?: Track[];
+  /** YouTube Music browse id (e.g. `VLPL...`, `MPRE...`). Present on online playlists. */
+  browseId?: string;
+  /** True when the playlist lives in the local user library (created via "Save to playlist"). */
+  isUserPlaylist?: boolean;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface Album {
@@ -42,6 +48,12 @@ export interface SearchResults {
   playlists: Playlist[];
 }
 
+export interface HomeFeed {
+  quickPicks: Track[];
+  recommendedPlaylists: Playlist[];
+  trending: Track[];
+}
+
 export interface UserSession {
   isAuthenticated: boolean;
   userEmail?: string;
@@ -59,4 +71,19 @@ export interface PlayerSettings {
   normalizeVolume: boolean;
   minimizeToTray: boolean;
   enableHardwareMediaKeys: boolean;
+}
+
+/** Where an audio stream came from — surfaced in the UI so users can see live streaming at work. */
+export interface StreamSourceInfo {
+  source: string;
+  resolvedAt: number;
+  url: string;
+}
+
+export type ToastKind = "success" | "error" | "info";
+
+export interface ToastMessage {
+  id: number;
+  text: string;
+  kind: ToastKind;
 }
