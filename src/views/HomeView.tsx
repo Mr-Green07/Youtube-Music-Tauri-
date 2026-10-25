@@ -8,17 +8,21 @@ import { fetchHomeFeed } from "../services/tauriBridge";
 interface HomeViewProps {
   currentTrackId?: string;
   isPlaying: boolean;
+  likedIds?: string[];
   onPlayTrack: (track: Track, queueContext?: Track[]) => void;
   onSelectPlaylist: (playlist: Playlist) => void;
-  onToggleLike: (trackId: string) => void;
+  onToggleLike: (track: Track) => void;
+  onSaveToPlaylist: (track: Track) => void;
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({
   currentTrackId,
   isPlaying,
+  likedIds,
   onPlayTrack,
   onSelectPlaylist,
   onToggleLike,
+  onSaveToPlaylist,
 }) => {
   const [quickPicks, setQuickPicks] = useState<Track[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -72,6 +76,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
               thumbnail={track.thumbnail}
               onClick={() => onPlayTrack(track, quickPicks)}
               onPlay={() => onPlayTrack(track, quickPicks)}
+              onSaveToPlaylist={() => onSaveToPlaylist(track)}
               badge={track.durationFormatted}
             />
           ))}
@@ -131,6 +136,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
             isPlaying={isPlaying}
             onPlayTrack={(track) => onPlayTrack(track, trending)}
             onToggleLike={onToggleLike}
+            onSaveToPlaylist={onSaveToPlaylist}
+            likedIds={likedIds}
           />
         </div>
       </section>

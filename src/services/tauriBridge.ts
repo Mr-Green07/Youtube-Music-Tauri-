@@ -1,4 +1,4 @@
-import { Track, Playlist, SearchResults, UserSession } from "../types/music";
+import { HomeFeed, Playlist, SearchResults, Track, UserSession } from "../types/music";
 import { MOCK_TRACKS, MOCK_PLAYLISTS, MOCK_ALBUMS } from "./mockData";
 
 // Helper to detect if running inside Tauri runtime
@@ -125,20 +125,13 @@ export async function logoutUser(): Promise<void> {
 /**
  * YouTube Music Innertube API Bridge
  */
-export async function fetchHomeFeed(): Promise<{
-  quickPicks: Track[];
-  recommendedPlaylists: Playlist[];
-  trending: Track[];
-}> {
+export async function fetchHomeFeed(): Promise<HomeFeed> {
+  // 1. Desktop: YouTube Music Innertube home feed (real online charts / mixes)
   const core = await getTauriCore();
   if (core) {
     try {
-      const data = await core.invoke<{
-        quickPicks: Track[];
-        recommendedPlaylists: Playlist[];
-        trending: Track[];
-      }>("ytm_get_home");
-      if (data && data.quickPicks && data.quickPicks.length > 0) {
+      const data = await core.invoke<HomeFeed>("ytm_get_home");
+      if (data?.quickPicks?.length) {
         return data;
       }
     } catch (e) {
@@ -146,6 +139,22 @@ export async function fetchHomeFeed(): Promise<{
     }
   }
 
+  // 2. Browser (or desktop failure): live search over public instances
+  try {
+    const { pipedSearch } = await import("./onlineStream");
+    const online = await pipedSearch("trending music");
+    if (online && online.tracks.length > 0) {
+      return {
+        quickPicks: online.tracks.slice(0, 6),
+        recommendedPlaylists: online.playlists.length ? online.playlists : MOCK_PLAYLISTS,
+        trending: online.tracks.slice(6, 14).length ? online.tracks.slice(6, 14) : online.tracks,
+      };
+    }
+  } catch (e) {
+    console.warn("Online home feed unavailable:", e);
+  }
+
+  // 3. Fully offline demo content
   return {
     quickPicks: MOCK_TRACKS.slice(0, 4),
     recommendedPlaylists: MOCK_PLAYLISTS,
@@ -158,18 +167,35 @@ export async function searchYouTubeMusic(query: string): Promise<SearchResults> 
     return { tracks: [], albums: [], playlists: [] };
   }
 
+  // 1. Desktop: YouTube Music Innertube search (real songs, albums, playlists)
   const core = await getTauriCore();
   if (core) {
     try {
       const res = await core.invoke<SearchResults>("ytm_search", { query });
-      if (res && (res.tracks.length > 0 || res.albums.length > 0)) {
+      if (res && (res.tracks.length > 0 || res.albums.length > 0 || res.playlists.length > 0)) {
         return res;
       }
     } catch (e) {
-      console.warn("Backend ytm_search fallback to local filtering:", e);
+      console.warn("Backend ytm_search failed, trying online instances:", e);
     }
   }
 
+  // 2. Public instances (Piped) — works in the browser preview as well
+  try {
+    const { pipedSearch } = await import("./onlineStream");
+    const online = await pipedSearch(query);
+    if (online && (online.tracks.length > 0 || online.playlists.length > 0)) {
+      return {
+        tracks: online.tracks,
+        albums: [],
+        playlists: online.playlists,
+      };
+    }
+  } catch (e) {
+    console.warn("Online search unavailable:", e);
+  }
+
+  // 3. Local demo catalogue
   const q = query.toLowerCase();
   const matchedTracks = MOCK_TRACKS.filter(
     (t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q)
@@ -180,36 +206,89 @@ export async function searchYouTubeMusic(query: string): Promise<SearchResults> 
   const matchedPlaylists = MOCK_PLAYLISTS.filter((p) => p.title.toLowerCase().includes(q));
 
   return {
-    tracks: matchedTracks.length ? matchedTracks : MOCK_TRACKS.slice(0, 3),
+    tracks: matchedTracks,
     albums: matchedAlbums,
     playlists: matchedPlaylists,
   };
 }
 
-export async function fetchAudioStream(track: Track): Promise<string> {
-  // If track already has a direct valid streamUrl, use it
-  if (track.streamUrl) {
-    return track.streamUrl;
+/**
+ * Loads the track list of an online playlist / album / mix.
+ *
+ * The result is used when the user opens a YouTube Music playlist card from
+ * search or from the home feed — without this the card would have no tracks.
+ */
+export async function fetchOnlinePlaylist(
+  playlist: Playlist
+): Promise<{ tracks: Track[]; title?: string; author?: string; thumbnail?: string }> {
+  if (playlist.tracks && playlist.tracks.length > 0) {
+    return { tracks: playlist.tracks };
   }
 
-  // Primary path: Use the cascading audio resolver (yt-dlp → Piped → Invidious)
+  const browseId = playlist.browseId || playlist.id;
+
+  // 1. Desktop backend (Innertube browse)
+  const core = await getTauriCore();
+  if (core && browseId) {
+    try {
+      const res = await core.invoke<{
+        tracks: Track[];
+        title?: string;
+        author?: string;
+        thumbnail?: string;
+      }>("ytm_get_playlist", { browseId });
+      if (res?.tracks?.length) {
+        return res;
+      }
+    } catch (e) {
+      console.warn("Backend ytm_get_playlist failed, trying public instances:", e);
+    }
+  }
+
+  // 2. Public instances
   try {
-    const { resolveTrackAudio } = await import("./audioResolver");
-    const resolvedUrl = await resolveTrackAudio(track);
-    if (resolvedUrl) {
-      return resolvedUrl;
+    const { fetchOnlinePlaylistTracks } = await import("./onlineStream");
+    const res = await fetchOnlinePlaylistTracks(browseId);
+    if (res?.tracks?.length) {
+      return res;
+    }
+  } catch (e) {
+    console.warn("Online playlist fetch unavailable:", e);
+  }
+
+  return { tracks: [] };
+}
+
+/**
+ * Resolves the best playable stream for a track together with the resolver that
+ * produced it (surfaced in the player bar as the live streaming source).
+ */
+export async function fetchAudioStream(
+  track: Track,
+  options: { forceRefresh?: boolean } = {}
+): Promise<{
+  url: string;
+  source: string;
+  quality?: string;
+  isFallback?: boolean;
+}> {
+  try {
+    const { resolveTrackAudioDetailed } = await import("./audioResolver");
+    const resolved = await resolveTrackAudioDetailed(track, "best", options);
+    if (resolved?.url) {
+      return resolved;
     }
   } catch (e) {
     console.warn("Audio resolver unavailable, falling back to Innertube:", e);
   }
 
-  // Secondary path: Direct Innertube player API
+  // Direct Innertube player API as a last desktop resort
   const core = await getTauriCore();
   if (core) {
     try {
       const streamUrl = await core.invoke<string>("ytm_get_stream", { videoId: track.id });
       if (streamUrl) {
-        return streamUrl;
+        return { url: streamUrl, source: "innertube:music.youtube.com" };
       }
     } catch (e) {
       console.error("Backend ytm_get_stream failed:", e);
@@ -217,7 +296,11 @@ export async function fetchAudioStream(track: Track): Promise<string> {
   }
 
   // Fallback royalty-free stream for offline preview
-  return "https://cdn.freesound.org/previews/612/612610_5674468-lq.mp3";
+  return {
+    url: "https://cdn.freesound.org/previews/612/612610_5674468-lq.mp3",
+    source: "offline:sample",
+    isFallback: true,
+  };
 }
 
 /**

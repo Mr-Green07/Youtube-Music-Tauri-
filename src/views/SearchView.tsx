@@ -8,9 +8,11 @@ import { searchYouTubeMusic } from "../services/tauriBridge";
 interface SearchViewProps {
   currentTrackId?: string;
   isPlaying: boolean;
+  likedIds?: string[];
   onPlayTrack: (track: Track, queueContext?: Track[]) => void;
   onSelectPlaylist: (playlist: Playlist) => void;
-  onToggleLike: (trackId: string) => void;
+  onToggleLike: (track: Track) => void;
+  onSaveToPlaylist: (track: Track) => void;
 }
 
 type FilterCategory = "all" | "songs" | "albums" | "playlists";
@@ -18,9 +20,11 @@ type FilterCategory = "all" | "songs" | "albums" | "playlists";
 export const SearchView: React.FC<SearchViewProps> = ({
   currentTrackId,
   isPlaying,
+  likedIds,
   onPlayTrack,
   onSelectPlaylist,
   onToggleLike,
+  onSaveToPlaylist,
 }) => {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
@@ -116,6 +120,9 @@ export const SearchView: React.FC<SearchViewProps> = ({
                   isPlaying={isPlaying}
                   onPlayTrack={(t) => onPlayTrack(t, results.tracks)}
                   onToggleLike={onToggleLike}
+                  onSaveToPlaylist={onSaveToPlaylist}
+                  likedIds={likedIds}
+                  emptyLabel="No songs matched this search."
                 />
               </div>
             </section>
@@ -165,7 +172,7 @@ export const SearchView: React.FC<SearchViewProps> = ({
                     key={pl.id}
                     id={pl.id}
                     title={pl.title}
-                    subtitle={`${pl.trackCount} tracks • ${pl.author || "YouTube Music"}`}
+                    subtitle={`${pl.trackCount || "Online"} tracks • ${pl.author || "YouTube Music"}`}
                     thumbnail={pl.thumbnail}
                     onClick={() => onSelectPlaylist(pl)}
                     onPlay={() => onSelectPlaylist(pl)}
@@ -175,7 +182,7 @@ export const SearchView: React.FC<SearchViewProps> = ({
             </section>
           )}
 
-          {results.tracks.length === 0 && results.albums.length === 0 && (
+          {results.tracks.length === 0 && results.albums.length === 0 && results.playlists.length === 0 && (
             <div className="py-12 text-center text-xs text-zinc-500">
               No results found for &quot;{query}&quot;. Try a different search term.
             </div>

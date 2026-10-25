@@ -17,7 +17,11 @@ export default defineConfig(() => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Bind on all interfaces so the same dev server works for `tauri dev`,
+    // a normal browser tab and remote previews.
+    host: host || "0.0.0.0",
+    // Dev-only: allow proxied preview hosts (Tauri uses localhost anyway).
+    allowedHosts: true,
     hmr: host
       ? {
           protocol: "ws",
